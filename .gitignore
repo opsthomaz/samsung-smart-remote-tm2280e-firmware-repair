@@ -1,0 +1,8 @@
+# Python
+__pycache__/
+*.pyc
+
+# Personal firmware dumps and patched outputs — never commit these:
+# they contain your device's BD Address and RF calibration
+backup_*.bin
+*_fixed.bin

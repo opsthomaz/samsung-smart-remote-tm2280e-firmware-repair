@@ -14,6 +14,11 @@ import sys
 import struct
 import argparse
 
+# Windows consoles often default to a legacy code page (cp1252) that
+# cannot encode the box-drawing characters printed below.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 
 # The Atmosic USR boot header has a 1-byte flag at offset +0x10
 # (immediately before the 3-byte "USR" signature)

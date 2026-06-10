@@ -14,7 +14,9 @@
 - Alternatively: `flashrom` (Linux/macOS)
 
 ### Files
-- `firmware/controller_fixed5.bin` — the patched firmware
+- `analysis/patch_your_firmware.py` — patches **your own dump** (Python 3.8+, no dependencies)
+
+> ⚠️ **Do NOT flash `firmware/controller_fixed5.bin` from this repo.** It contains the researcher's BD Address (Bluetooth MAC) and RF calibration data. Flashing it clones another device's Bluetooth identity and overwrites your factory calibration. It is included for analysis and comparison only.
 
 ---
 
@@ -69,31 +71,51 @@ Before writing anything:
 1. Mount the chip in the CH341A socket (with 1.8V adapter installed)
 2. Open AsProgrammer → Select chip type: **W25Q40EW**
 3. Read the chip → Save as `backup_YYYYMMDD.bin`
-4. Verify the SHA256 matches: `433eb1e84ceb9924d8aeb612344638eed1fa645861db070472fc9dd187c01ff4`
+4. **Read it twice and compare** — both reads must be identical (any difference means an unstable connection or voltage problem)
 
-If the SHA256 does not match, the chip contents differ from the analyzed dump. Do not proceed until you understand why.
+Your dump's SHA256 will **not** match the reference dump in this repo — your remote has its own BD Address and calibration data. That is expected. What matters is that the dump is 524,288 bytes and passes the structure checks below.
+
+Confirm your remote has the same failure state before patching:
+
+```bash
+python3 analysis/boot_flag_analysis.py backup_YYYYMMDD.bin
+```
+
+You should see Bank B in state `NEARLY_CONFIRMED` (flag `0x08`). If your flags differ, open an issue with the output instead of blindly flashing.
 
 ---
 
-## Step 5 — Write the Fixed Firmware
+## Step 5 — Patch Your Dump and Write It
 
-1. Open `firmware/controller_fixed5.bin` in AsProgrammer
-2. Verify SHA256 of the file: `12b4dfdf84be17cb92b0c7c56bfe04aaeb7bc8560330e59c42ca03190a8efb08`
-3. Select chip: **W25Q40EW** at **1.8V**
-4. Erase → Program → Verify
-5. The verify step must pass completely — any verify failure means the write did not work (likely voltage issue)
+1. Patch **your own backup** (preserves your BD Address and calibration):
+
+   ```bash
+   python3 analysis/patch_your_firmware.py backup_YYYYMMDD.bin
+   # → writes backup_YYYYMMDD_fixed.bin and prints a report
+   ```
+
+2. Check the report: it should list 2 changes, confirm your BD Address was found, and confirm your RF calibration entries are preserved
+3. Open `backup_YYYYMMDD_fixed.bin` in AsProgrammer
+4. Select chip: **W25Q40EW** at **1.8V**
+5. Erase → Program → Verify
+6. The verify step must pass completely — any verify failure means the write did not work (likely voltage issue)
 
 ### Using flashrom (Linux/macOS)
 
 ```bash
-# Read original (backup)
-flashrom -p ch341a_spi -r backup_original.bin
+# Read original (backup) — twice, then compare
+flashrom -p ch341a_spi -r backup_YYYYMMDD.bin
+flashrom -p ch341a_spi -r backup_check.bin
+cmp backup_YYYYMMDD.bin backup_check.bin
 
-# Write fixed firmware
-flashrom -p ch341a_spi -w controller_fixed5.bin
+# Patch your own dump
+python3 analysis/patch_your_firmware.py backup_YYYYMMDD.bin
+
+# Write the patched dump
+flashrom -p ch341a_spi -w backup_YYYYMMDD_fixed.bin
 
 # Verify
-flashrom -p ch341a_spi -v controller_fixed5.bin
+flashrom -p ch341a_spi -v backup_YYYYMMDD_fixed.bin
 ```
 
 Note: flashrom may need `--chip W25Q40EW` specified explicitly.
@@ -149,10 +171,10 @@ If pairing does not work after 3 attempts:
 
 ## What the Fix Does
 
-The patch modifies exactly 188 bytes:
+The patch makes 2 changes (188 bytes on the reference dump; the NVDS copy size depends on your dump's contents):
 
-1. **`0x40010`: `0x08` → `0x00`** — Programs the final `BOOT_CONFIRMED` bit in Bank B's header. This tells the bootloader that Bank B (v0.2.0.0) is the fully confirmed active firmware, ending the ambiguous OTA state.
+1. **`0x40010`: `0x08` → `0x00`** — Programs the final `BOOT_CONFIRMED` bit in Bank B's header. This tells the bootloader that Bank B is the fully confirmed active firmware, ending the ambiguous OTA state.
 
-2. **`0x3F000–0x3F0BB`** — Restores the Bank A NVDS secondary slot from the primary slot data. This provides the redundant NVDS copy that was missing, preventing NVDS validation failures on future boots.
+2. **`0x3F000–0x3F0BA`** (187 bytes on the reference dump) — Restores the Bank A NVDS secondary slot from the primary slot data. This provides the redundant NVDS copy that was missing, preventing NVDS validation failures on future boots.
 
 No firmware code is modified. No calibration data is touched. The BD Address is preserved.

@@ -15,14 +15,19 @@ import struct
 import argparse
 import hashlib
 
+# Windows consoles often default to a legacy code page (cp1252) that
+# cannot encode the box-drawing characters printed below.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 
 REGIONS = [
-    (0x00000, 0x00100, "Boot vector / ARM trampolim"),
-    (0x00100, 0x30000, "Bank A — application code"),
+    (0x00000, 0x00100, "Boot vector / ARM trampoline"),
+    (0x00100, 0x30000, "Bank A — stage-1 + application code"),
     (0x30000, 0x3F000, "NVDS Bank A — primary"),
     (0x3F000, 0x40000, "NVDS Bank A — secondary"),
     (0x40000, 0x40100, "Bank B — boot vector"),
-    (0x40100, 0x70000, "Bank B — application code"),
+    (0x40100, 0x70000, "Bank B — stage-1 + application code"),
     (0x70000, 0x7F000, "NVDS Bank B — primary"),
     (0x7F000, 0x80000, "NVDS Bank B — secondary"),
 ]
@@ -98,28 +103,35 @@ def print_nvds_summary(data: bytes):
     print("NVDS Slot Summary")
     print(f"{'─'*60}")
 
+    # NVDS entry format: [tag: 1][status: 1][length: 1][value: length bytes],
+    # chain ends at the first 0xFF tag byte (erased flash)
     nvds_slots = [
-        (0x30000, "Bank A primary"),
-        (0x3F000, "Bank A secondary"),
-        (0x70000, "Bank B primary"),
-        (0x7F000, "Bank B secondary"),
+        (0x30000, 0xF000, "Bank A primary"),
+        (0x3F000, 0x1000, "Bank A secondary"),
+        (0x70000, 0xF000, "Bank B primary"),
+        (0x7F000, 0x1000, "Bank B secondary"),
     ]
 
-    for offset, label in nvds_slots:
+    for offset, size, label in nvds_slots:
         magic = data[offset:offset + 4]
         if magic == b'NVDS':
-            # Count non-FF bytes
-            region = data[offset:offset + 0x1000]
+            region = data[offset:offset + size]
             non_ff = sum(1 for b in region if b != 0xFF)
-            # Find end of NVDS
+            # Walk entries to find where the chain ends
             end_off = offset + 4
-            while end_off < offset + 0x1000:
-                if data[end_off] == 0xFF:
+            entries = 0
+            pos = offset + 4
+            while pos + 3 <= offset + size:
+                if data[pos] == 0xFF:
                     break
-                length = data[end_off + 1] if end_off + 1 < offset + 0x1000 else 0
-                end_off += 2 + length
-            nvds_size = end_off - offset - 4
-            print(f"  {label:<25} ✅ NVDS  {non_ff:5d} bytes  (entries end @ 0x{end_off:05X})")
+                length = data[pos + 2]
+                if pos + 3 + length > offset + size:
+                    break
+                entries += 1
+                pos += 3 + length
+                end_off = pos
+            print(f"  {label:<25} ✅ NVDS  {non_ff:5d} bytes  {entries:3d} entries"
+                  f"  (entries end @ 0x{end_off:05X})")
         elif all(b == 0xFF for b in data[offset:offset + 16]):
             print(f"  {label:<25} ❌ BLANK")
         else:

@@ -26,6 +26,25 @@ The Atmosic ATM3 uses a **dual-bank firmware system** for OTA updates. Two compl
 0x80000 ─────────────────────────── end
 ```
 
+### Bank Image Structure
+
+Each bank is itself a **multi-image container** with three USR headers:
+
+```
+Bank-relative   Content
++0x010          Outer USR header — carries the OTA boot flag,
+                entry pointer targets the main application
++0x110          Stage-1 image (own USR header at +0x110, entry +0x170)
+                "App Version 0.0.0.9" / "SDK Version 4.1.0"
++0x3810 (A) /   Main application (own USR header, entry just after it)
++0x32A0 (B)     "App Version 0.2.0.0" / "SDK Version 4.1.1"
+```
+
+The stage-1 images in both banks are nearly identical (>99.9% byte
+identity); the main applications differ substantially (~6% byte
+identity) even though both carry the same version strings — Bank B's
+application is presumably the OTA-delivered build.
+
 ---
 
 ## The USR Header
@@ -34,7 +53,7 @@ Each bank begins with a proprietary Atmosic boot header. The critical field is a
 
 ```
 Offset  Size  Content
-+0x00   16    ARM Thumb trampolim (jump instructions)
++0x00   16    ARM Thumb trampoline (jump instructions)
 +0x10    1    Flag byte  ← boot decision field
 +0x11    3    "USR" signature (0x55 0x53 0x52)
 +0x14    4    Stack/entry pointer 1
@@ -181,4 +200,4 @@ To resolve the interrupted OTA state:
    - Provides the missing redundant NVDS copy
    - Prevents NVDS validation failure on future boots
 
-See `firmware/controller_fixed5.bin` for the patched image.
+See `firmware/controller_fixed5.bin` for the patched image (**reference only — do not flash it on your own remote**; use `analysis/patch_your_firmware.py` on your own dump instead, see the README warning).

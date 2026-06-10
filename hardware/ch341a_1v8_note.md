@@ -40,7 +40,7 @@ When AsProgrammer or NeoProgrammer detects the chip, it should show:
 W25Q40EW    1.8V    4 Mbits    256 Bytes    WINBOND    SPI_NOR
 ```
 
-(not the 3.3V variant `W25Q40EW_1.8V` shown as a fallback — use the primary 1.8V entry)
+**Important:** selecting a 1.8V chip profile in the software does **not** change the programmer's signal voltage. The CH341A hardware still drives 3.3V unless the physical 1.8V adapter is installed. The software entry only sets the chip's command set and size.
 
 ## Alternative: In-System Programming at the Correct Voltage
 

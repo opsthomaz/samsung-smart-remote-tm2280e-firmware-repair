@@ -14,9 +14,9 @@ That file contains data uniquely tied to the researcher's specific hardware unit
 
 1. **BD Address (Bluetooth MAC):** `70:09:71:1A:CC:2E` — flashing this clones the researcher's Bluetooth identity onto your device, causing pairing conflicts if both remotes exist on the same network.
 
-2. **RF Calibration (~156 entries, tag `0xC1`):** These values were measured and programmed at the factory specifically for the physical tolerances of the researcher's crystal oscillator and antenna. Overwriting them with someone else's calibration can severely degrade Bluetooth range or cause random disconnections.
+2. **RF Calibration (157 entries, tag `0xC1` — 1 current + 156 superseded history):** These values were programmed specifically for the physical tolerances of the researcher's crystal oscillator and antenna. Overwriting them with someone else's calibration can severely degrade Bluetooth range or cause random disconnections.
 
-**The correct approach:** Use `analysis/patch_your_firmware.py` to apply the two-byte fix to **your own dump**, preserving your unique BD Address and RF calibration.
+**The correct approach:** Use `analysis/patch_your_firmware.py` to apply the fix (2 changes: one flag byte + NVDS secondary restore) to **your own dump**, preserving your unique BD Address and RF calibration.
 
 ```bash
 # Read your own flash first (with 1.8V adapter!)
@@ -66,13 +66,15 @@ The remote stopped synchronizing with the TV after a failed OTA firmware update.
 ```
 Offset      Size    Region                       Contents
 ─────────────────────────────────────────────────────────────────────
-0x00000  192 KB    Bank A — firmware code        App v0.0.0.9 / SDK 4.1.0
+0x00000  192 KB    Bank A — firmware image       stage-1 + main application
 0x30000   60 KB    NVDS Bank A — primary         187 bytes valid (BD Address, config)
 0x3F000    4 KB    NVDS Bank A — secondary       ❌ BLANK — erased
-0x40000  192 KB    Bank B — firmware code        App v0.2.0.0 / SDK 4.1.1
-0x70000   60 KB    NVDS Bank B — primary         4085 bytes valid (full calibration)
-0x7F000    4 KB    NVDS Bank B — secondary       ⚠️  Nearly erased (13 bytes)
+0x40000  192 KB    Bank B — firmware image       stage-1 + main application (OTA build)
+0x70000   60 KB    NVDS Bank B — primary         4,224 bytes valid (config + calibration)
+0x7F000    4 KB    NVDS Bank B — secondary       ⚠️  Nearly erased (13 bytes — BD Address)
 ```
+
+Each bank is a multi-image container: a stage-1 image (`App Version 0.0.0.9` / `SDK Version 4.1.0`) followed by the main application (`App Version 0.2.0.0` / `SDK Version 4.1.1`). The stage-1 images of the two banks are nearly identical; the main applications differ substantially (Bank B holds the OTA-delivered build). See `docs/ota_mechanism.md` for the full structure.
 
 ---
 
@@ -105,7 +107,7 @@ With the secondary slot erased, NVDS validation failed during first boot after O
 | Offset | Change | Reason |
 |--------|--------|--------|
 | `0x40010` | `0x08` → `0x00` | Bank B: program bit 3 → `BOOT_CONFIRMED` |
-| `0x3F000–0x3F0BB` | `0xFF...` → NVDS data | Restore Bank A NVDS secondary from primary |
+| `0x3F000–0x3F0BA` | `0xFF...` → NVDS data (187 bytes) | Restore Bank A NVDS secondary from primary |
 
 **Apply to your own dump:**
 ```bash
@@ -128,7 +130,7 @@ samsung-smart-remote-tm2280e-firmware-repair/
 │   └── controller_fixed5.bin        ← Researcher's patched firmware (reference only)
 ├── analysis/
 │   ├── patch_your_firmware.py       ← ✅ USE THIS to fix your own dump
-│   ├── nvds_decoder.py              ← NVDS TLV decoder
+│   ├── nvds_decoder.py              ← NVDS decoder (tag/status/length format)
 │   ├── flash_layout.py              ← Flash region mapper and auditor
 │   └── boot_flag_analysis.py        ← Boot decision flag analysis
 ├── docs/
@@ -176,7 +178,7 @@ python3 analysis/patch_your_firmware.py your_backup.bin
 | Finding | Status |
 |---------|--------|
 | Atmosic ATM3 dual-bank boot flag system documented | ✅ First public documentation |
-| NVDS TLV format decoded | ✅ |
+| NVDS format decoded (tag/status/length entries) | ✅ |
 | Root cause of sync failure identified | ✅ Interrupted OTA + erased NVDS secondary |
 | Automated patch script (preserves user's unique data) | ✅ |
 | W25Q40EW 1.8V voltage warning | ✅ Critical |

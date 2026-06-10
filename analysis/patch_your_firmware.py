@@ -8,8 +8,8 @@ patch_your_firmware.py — Apply the TM2280E OTA fix to YOUR OWN firmware dump.
     else's Bluetooth address and overwrite your factory RF calibration.
 
     USE THIS SCRIPT INSTEAD. It patches your own dump, preserving your
-    unique BD Address and the ~156 factory RF calibration entries that
-    were programmed specifically for your hardware's physical tolerances.
+    unique BD Address and the device-specific RF calibration entries
+    stored in your NVDS.
 
 What this script does:
   1. Validates your dump (size, Bank A/B USR signatures)
@@ -17,6 +17,9 @@ What this script does:
   3. Restores Bank A NVDS secondary slot from primary: 0x30000 → 0x3F000
   4. Verifies your BD Address and RF calibration are preserved
   5. Saves the patched file as <original>_fixed.bin
+
+The fix is two changes (188 bytes on the reference dump): one flag byte
+plus the NVDS secondary restore. No firmware code is modified.
 
 Usage:
   python3 patch_your_firmware.py your_backup.bin
@@ -26,11 +29,13 @@ Usage:
 
 import sys
 import os
-import struct
 import hashlib
 import argparse
-import shutil
-from datetime import datetime
+
+# Windows consoles often default to a legacy code page (cp1252) that
+# cannot encode the arrows/checkmarks printed below.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
 # Expected flash size
@@ -46,6 +51,13 @@ BANK_B_NVDS_PRIMARY = 0x70000
 # USR signature
 USR_SIG = b'USR'
 
+# NVDS entry format: [tag: 1][status: 1][length: 1][value: length bytes]
+# Status 0x06 = current entry, 0x02 = superseded (an update was appended later)
+NVDS_MAGIC = b'NVDS'
+NVDS_STATUS_CURRENT = 0x06
+NVDS_TAG_BD_ADDRESS = 0x01
+NVDS_TAG_RF_CAL = 0xC1
+
 # The ONLY two byte changes this script makes
 BOOT_CONFIRMED = 0x00
 NEARLY_CONFIRMED = 0x08
@@ -59,60 +71,45 @@ def format_bd_address(data: bytes) -> str:
     return ':'.join(f'{b:02X}' for b in reversed(data))
 
 
-def find_bd_address(data: bytes, offset: int) -> bytes | None:
-    """Find BD Address in NVDS region starting at offset."""
-    pos = offset + 4  # skip NVDS magic
-    end = offset + 0x1000
+def iter_nvds_entries(data: bytes, offset: int, size: int):
+    """Yield (pos, tag, status, length, value) for each NVDS entry.
 
-    while pos < end:
-        tag = data[pos]
-        if tag == 0xFF:
-            break
-        if pos + 1 >= end:
-            break
-        length = data[pos + 1]
-        value = data[pos + 2:pos + 2 + length]
-
-        # Tag 0x3A = BD Address (direct), tag 0x01 = BD Address variant
-        if tag in (0x01, 0x3A) and length == 6:
-            return value
-
-        # Also check inside config block (tag 0x20), sub-tag 0x3A
-        if tag == 0x20:
-            i = 11  # skip device name continuation
-            while i < length - 1:
-                stag = value[i] if i < len(value) else 0xFF
-                if stag == 0xFF:
-                    break
-                slen = value[i + 1] if i + 1 < len(value) else 0
-                sval = value[i + 2:i + 2 + slen]
-                if stag == 0x3A and slen == 6:
-                    return sval
-                i += 2 + slen
-
-        pos += 2 + length
-
-    return None
-
-
-def count_calibration_entries(data: bytes, offset: int) -> int:
-    """Count RF calibration entries (tag 0xC1) in an NVDS region."""
+    The chain ends at the first 0xFF tag byte (erased flash) or when an
+    entry would run past the slot boundary.
+    """
+    if data[offset:offset + 4] != NVDS_MAGIC:
+        return
     pos = offset + 4
-    end = offset + 0x10000  # Bank NVDS can be up to 60KB
-    count = 0
-
-    while pos < end:
+    end = offset + size
+    while pos + 3 <= end:
         tag = data[pos]
         if tag == 0xFF:
-            break
-        if pos + 1 >= end:
-            break
-        length = data[pos + 1]
-        if tag == 0xC1:
-            count += 1
-        pos += 2 + length
+            return
+        status = data[pos + 1]
+        length = data[pos + 2]
+        if pos + 3 + length > end:
+            return
+        yield pos, tag, status, length, data[pos + 3:pos + 3 + length]
+        pos += 3 + length
 
-    return count
+
+def find_bd_address(data: bytes, offset: int, size: int = 0xF000) -> bytes | None:
+    """Find the BD Address (tag 0x01) in an NVDS region, preferring a
+    current entry over superseded ones."""
+    found = None
+    for _, tag, status, length, value in iter_nvds_entries(data, offset, size):
+        if tag == NVDS_TAG_BD_ADDRESS and length == 6:
+            if status == NVDS_STATUS_CURRENT:
+                found = value
+            elif found is None:
+                found = value
+    return found
+
+
+def count_calibration_entries(data: bytes, offset: int, size: int = 0xF000) -> int:
+    """Count RF calibration entries (tag 0xC1) in an NVDS region."""
+    return sum(1 for _, tag, _, _, _ in iter_nvds_entries(data, offset, size)
+               if tag == NVDS_TAG_RF_CAL)
 
 
 def validate_dump(data: bytes) -> list:
@@ -140,24 +137,19 @@ def validate_dump(data: bytes) -> list:
 
 
 def get_nvds_blob(data: bytes, offset: int) -> bytes:
-    """Extract the populated NVDS data (magic + entries + first FF)."""
-    if data[offset:offset + 4] != b'NVDS':
+    """Extract the populated NVDS data (magic + entries) from a slot.
+
+    Capped at 4 KB because the restore target (the secondary slot) is a
+    single 4 KB sector.
+    """
+    if data[offset:offset + 4] != NVDS_MAGIC:
         return b''
 
-    pos = offset + 4
-    end = offset + 0x1000
+    end = offset + 4
+    for pos, _, _, length, _ in iter_nvds_entries(data, offset, 0x1000):
+        end = pos + 3 + length
 
-    while pos < end:
-        tag = data[pos]
-        if tag == 0xFF:
-            pos += 1  # include the terminator
-            break
-        if pos + 1 >= end:
-            break
-        length = data[pos + 1]
-        pos += 2 + length
-
-    return data[offset:pos]
+    return data[offset:end]
 
 
 def apply_patch(data: bytes, dry_run: bool = False) -> tuple[bytes, dict]:
